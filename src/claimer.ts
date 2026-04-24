@@ -241,14 +241,13 @@ export class DropClaimer {
         `Armed! Wait until: ${new Date(arm.notValidBeforeMs).toLocaleTimeString()} (${formatMs(Math.max(0, waitMs))})`
       );
 
-      // Step 2: Wait EXACTLY until notValidBeforeMs + safe buffer
+      // Step 2: Wait until notValidBeforeMs + generous buffer
+      // Server clock and client clock may drift 1-2s
       if (waitMs > 0) {
-        // Add 300-600ms buffer to be safely past the threshold
-        const buffer = Math.floor(Math.random() * 300 + 300);
+        const buffer = Math.floor(Math.random() * 1000 + 1500); // 1.5-2.5s buffer
         await sleep(waitMs + buffer);
       } else {
-        // Already past - add small buffer just in case
-        await sleep(300);
+        await sleep(1500); // safety margin even if already "past"
       }
 
       // Step 3: Build interaction proof
@@ -274,18 +273,19 @@ export class DropClaimer {
           log.warn(this.name, `Rate limited. Backing off ${formatMs(backoff)}...`);
           this.claimCooldownUntil = Date.now() + backoff;
         } else if (err === "slot_not_yet_revealed") {
-          // Tried too early - wait 2s and retry once
-          log.warn(this.name, "Too early! Retrying in 2s...");
-          await sleep(2000);
+          // Tried too early - wait 4s and retry once
+          log.warn(this.name, "Too early! Retrying in 4s...");
+          await sleep(4000);
           if (this.running) {
             log.info(this.name, "Retrying claim...");
-            const retryProof = buildInteractionProof(arm.nonce, windowOpenMs + 2000, armedMs + 2000);
+            const retryProof = buildInteractionProof(arm.nonce, windowOpenMs + 4000, armedMs + 4000);
             const retry = await api.claimDrop(this.state.config, arm.token, retryProof);
             if (retry.ok) {
               this.handleClaimSuccess(retry);
             } else {
               log.error(this.name, `Retry failed: ${(retry as any).error}`);
-              this.claimCooldownUntil = Date.now() + 10000;
+              // Don't spam - back off 20s
+              this.claimCooldownUntil = Date.now() + 20000;
             }
           }
         } else if (err === "pool_exhausted") {
