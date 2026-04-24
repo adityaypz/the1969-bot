@@ -231,29 +231,22 @@ export class DropClaimer {
         `Armed! Token received. Wait until: ${new Date(arm.notValidBeforeMs).toLocaleTimeString()}`
       );
 
-      // Step 2: Wait for notValidBeforeMs + human-like buffer
+      // Step 2: Wait EXACTLY until notValidBeforeMs + tiny buffer
+      // Pool exhausts in ~7s, server enforces ~5s wait. No room for human delay.
       const armTime = Date.now();
       const waitMs = arm.notValidBeforeMs - armTime;
       if (waitMs > 0) {
-        const humanDelay = getHumanClaimDelay(
-          this.config.claimDelayMin,
-          this.config.claimDelayMax
-        );
-        const totalWait = waitMs + this.config.armWaitBuffer + humanDelay;
+        // Wait exactly until valid + 100-300ms buffer (just enough to not be before)
+        const buffer = Math.floor(Math.random() * 200 + 100);
+        const totalWait = waitMs + buffer;
         log.info(this.name, `Waiting ${formatMs(totalWait)} before claiming...`);
         await sleep(totalWait);
-      } else {
-        const delay = getHumanClaimDelay(
-          this.config.claimDelayMin,
-          this.config.claimDelayMax
-        );
-        log.info(this.name, `Adding human delay: ${formatMs(delay)}`);
-        await sleep(delay);
       }
+      // No else delay - claim ASAP
 
       // Step 3: Build interaction proof
       this.state.isClaiming = true;
-      const armedMs = Date.now() - armTime; // real elapsed time since arm
+      const armedMs = Date.now() - armTime;
       const windowOpenMs = Date.now() - this.state.windowOpenMs;
 
       const proof = buildInteractionProof(arm.nonce, windowOpenMs, armedMs);
