@@ -1,0 +1,19 @@
+{
+  "name": "the1969-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "auth": "tsx src/auth.ts",
+    "status": "tsx src/status.ts"
+  },
+  "dependencies": {
+    "@types/node": "^25.6.0",
+    "chalk": "^4.1.2",
+    "dotenv": "^17.4.2",
+    "https-proxy-agent": "^9.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}
