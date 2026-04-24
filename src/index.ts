@@ -16,6 +16,7 @@
 
 import { loadConfig } from "./config.js";
 import { DropClaimer } from "./claimer.js";
+import { SocialTaskRunner } from "./social.js";
 import * as log from "./logger.js";
 import chalk from "chalk";
 
@@ -29,17 +30,15 @@ async function main() {
   log.info("", `Claim delay: ${config.claimDelayMin}-${config.claimDelayMax}ms`);
   log.info("", `Max claims/session: ${config.maxClaimsPerSession}`);
   log.info("", `Auto-claim: ${config.enableAutoClaim ? "ON" : "OFF"}`);
+  log.info("", `Social tasks: ${config.enableTaskClaim ? "ON" : "OFF"}`);
   console.log();
 
-  // Stagger account starts to avoid burst detection
   const claimers: DropClaimer[] = [];
+  const socialRunners: SocialTaskRunner[] = [];
 
   for (let i = 0; i < config.accounts.length; i++) {
     const acc = config.accounts[i];
     log.info("", `Initializing [${acc.name}]${acc.proxy ? ` via proxy` : ""}...`);
-
-    const claimer = new DropClaimer(acc, config);
-    claimers.push(claimer);
 
     // Stagger start by 2-5s per account
     if (i > 0) {
@@ -48,7 +47,19 @@ async function main() {
       await new Promise((r) => setTimeout(r, stagger));
     }
 
-    claimer.start();
+    // Drop claimer
+    if (config.enableAutoClaim) {
+      const claimer = new DropClaimer(acc, config);
+      claimers.push(claimer);
+      claimer.start();
+    }
+
+    // Social task runner
+    if (config.enableTaskClaim) {
+      const social = new SocialTaskRunner(acc, config);
+      socialRunners.push(social);
+      social.start();
+    }
   }
 
   // Stats printer every 5 minutes
@@ -59,7 +70,14 @@ async function main() {
       const s = c.stats;
       log.info(
         c.name,
-        `Claims: ${s.totalClaims} (session: ${s.sessionClaims}) | BUSTS: ${s.totalBusts} | Errors: ${s.errors}`
+        `Drops: ${s.totalClaims} (session: ${s.sessionClaims}) | BUSTS: ${s.totalBusts} | Errors: ${s.errors}`
+      );
+    }
+    for (const s of socialRunners) {
+      const st = s.stats;
+      log.info(
+        s.name,
+        `Tasks: ${st.completedTasks} done, ${st.totalActions} actions | BUSTS: ${st.totalBusts}`
       );
     }
     console.log();
@@ -69,6 +87,7 @@ async function main() {
   const shutdown = () => {
     log.warn("", "Shutting down...");
     for (const c of claimers) c.stop();
+    for (const s of socialRunners) s.stop();
     process.exit(0);
   };
 

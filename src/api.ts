@@ -11,6 +11,9 @@ import type {
   InteractionProof,
   UserProfile,
   TasksResponse,
+  TaskSubmitResponse,
+  FollowClaimResponse,
+  TaskAction,
 } from "./types.js";
 import * as log from "./logger.js";
 
@@ -147,14 +150,14 @@ export async function getActiveTasks(account: AccountConfig): Promise<TasksRespo
 
 export async function submitTask(
   account: AccountConfig,
-  taskId: string,
-  action: string
-): Promise<{ ok: boolean; error?: string }> {
-  return post("/api/tasks-submit", { taskId, action }, account);
+  taskId: number,
+  action: TaskAction
+): Promise<TaskSubmitResponse> {
+  return post<TaskSubmitResponse>("/api/tasks-submit", { taskId, action }, account);
 }
 
 export async function claimFollowTask(
   account: AccountConfig
-): Promise<{ ok: boolean; error?: string }> {
-  return post("/api/task-follow-claim", null, account);
+): Promise<FollowClaimResponse> {
+  return post<FollowClaimResponse>("/api/task-follow-claim", null, account);
 }

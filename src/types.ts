@@ -99,15 +99,44 @@ export interface UserProfile {
   whitelistWallet?: string | null;
 }
 
+export type TaskAction = "like" | "rt" | "reply";
+
+export interface SocialTask {
+  id: number;
+  tweetId: string;
+  tweetUrl: string;
+  description: string;
+  rewards: {
+    like: number;
+    rt: number;
+    reply: number;
+    trifecta: number;
+  };
+  activeFrom: string;
+  activeUntil: string | null;
+  myActions: Record<string, any>;
+}
+
 export interface TasksResponse {
   ok: boolean;
-  tasks?: Array<{
-    id: string;
-    type: string;
-    action: string;
-    reward: number;
-    completed: boolean;
-  }>;
+  tasks?: SocialTask[];
+}
+
+export interface TaskSubmitResponse {
+  ok: boolean;
+  submitted?: boolean;
+  points?: number;
+  status?: string;
+  error?: string;
+}
+
+export interface FollowClaimResponse {
+  ok: boolean;
+  claimed?: boolean;
+  reward?: number;
+  claimedAt?: string;
+  verified?: boolean;
+  error?: string;
 }
 
 // Session state tracking
