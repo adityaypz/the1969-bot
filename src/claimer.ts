@@ -107,9 +107,28 @@ export class DropClaimer {
         this.state.errors++;
       }
 
-      // Wait before next poll
+      // Adaptive polling: fast near drop time, slow otherwise
       if (this.running) {
-        await sleep(this.config.pollInterval);
+        const msUntil = this.state.lastDropStatus?.msUntilNext ?? Infinity;
+        let interval = this.config.pollInterval; // default 15s
+
+        if (msUntil <= 10_000) {
+          // <10s to drop: poll every 1s (snipe mode)
+          interval = 1000;
+        } else if (msUntil <= 30_000) {
+          // <30s: poll every 3s
+          interval = 3000;
+        } else if (msUntil <= 60_000) {
+          // <1min: poll every 5s
+          interval = 5000;
+        }
+
+        // Also fast-poll while drop is active
+        if (this.state.lastDropStatus?.isActive) {
+          interval = 2000;
+        }
+
+        await sleep(interval);
       }
     }
   }
@@ -148,8 +167,13 @@ export class DropClaimer {
       this.state.sessionClaims < this.config.maxClaimsPerSession;
 
     if (!isActive) {
-      // Print heartbeat every 60s so user knows bot is alive
+      // Snipe mode alert
       const now = Date.now();
+      if (msUntilNext <= 30_000 && msUntilNext > 0) {
+        log.warn(this.name, `DROP IN ${formatMs(msUntilNext)}! Snipe mode active (polling every 1-3s)`);
+      }
+
+      // Print heartbeat every 60s so user knows bot is alive
       if (now - this.lastHeartbeat >= 60_000) {
         this.lastHeartbeat = now;
         log.info(
