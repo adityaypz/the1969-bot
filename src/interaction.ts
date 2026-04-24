@@ -78,9 +78,10 @@ function generatePathEntropy(): { moveCount: number; pathEntropy: number } {
  * Generate drag variance values (simulating drag gesture on claim button)
  */
 function generateDragVariance(): { dragVarX: number; dragVarY: number } {
-  // Humans have moderate variance in drag gestures
-  const dragVarX = Math.round(rand(3, 12) * 10) / 10;
-  const dragVarY = Math.round(rand(2, 10) * 10) / 10;
+  // Server rejects "proof_drag_too_short" if values too low
+  // Real human drag gestures have significant variance
+  const dragVarX = Math.round(rand(8, 25) * 10) / 10;
+  const dragVarY = Math.round(rand(6, 20) * 10) / 10;
   return { dragVarX, dragVarY };
 }
 

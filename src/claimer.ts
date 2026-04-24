@@ -208,19 +208,17 @@ export class DropClaimer {
       );
 
       // Step 2: Wait for notValidBeforeMs + human-like buffer
-      const waitMs = arm.notValidBeforeMs - Date.now();
+      const armTime = Date.now();
+      const waitMs = arm.notValidBeforeMs - armTime;
       if (waitMs > 0) {
-        const totalWait =
-          waitMs +
-          this.config.armWaitBuffer +
-          getHumanClaimDelay(
-            this.config.claimDelayMin,
-            this.config.claimDelayMax
-          );
+        const humanDelay = getHumanClaimDelay(
+          this.config.claimDelayMin,
+          this.config.claimDelayMax
+        );
+        const totalWait = waitMs + this.config.armWaitBuffer + humanDelay;
         log.info(this.name, `Waiting ${formatMs(totalWait)} before claiming...`);
         await sleep(totalWait);
       } else {
-        // Already past notValidBeforeMs, add small human delay
         const delay = getHumanClaimDelay(
           this.config.claimDelayMin,
           this.config.claimDelayMax
@@ -231,7 +229,7 @@ export class DropClaimer {
 
       // Step 3: Build interaction proof
       this.state.isClaiming = true;
-      const armedMs = Date.now() - (arm.notValidBeforeMs - (waitMs > 0 ? waitMs : 0));
+      const armedMs = Date.now() - armTime; // real elapsed time since arm
       const windowOpenMs = Date.now() - this.state.windowOpenMs;
 
       const proof = buildInteractionProof(arm.nonce, windowOpenMs, armedMs);
