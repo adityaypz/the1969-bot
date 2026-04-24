@@ -79,9 +79,10 @@ function generatePathEntropy(): { moveCount: number; pathEntropy: number } {
  */
 function generateDragVariance(): { dragVarX: number; dragVarY: number } {
   // Server rejects "proof_drag_too_short" if values too low
-  // Real human drag gestures have significant variance
-  const dragVarX = Math.round(rand(8, 25) * 10) / 10;
-  const dragVarY = Math.round(rand(6, 20) * 10) / 10;
+  // "Drag the handle across the rail" = long horizontal drag gesture
+  // Need high X variance (main drag axis), moderate Y variance (wobble)
+  const dragVarX = Math.round(rand(20, 50) * 10) / 10;
+  const dragVarY = Math.round(rand(8, 25) * 10) / 10;
   return { dragVarX, dragVarY };
 }
 
