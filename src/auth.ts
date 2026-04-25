@@ -1,9 +1,6 @@
 // ============================================
 // THE 1969 Bot - Auth Tester
 // ============================================
-// Tests all configured accounts to verify cookies are valid
-//
-// Usage: npm run auth
 
 import { loadConfig } from "./config.js";
 import * as api from "./api.js";
@@ -27,26 +24,32 @@ async function main() {
       continue;
     }
 
-    const u = me.user;
-    log.success(acc.name, `Authenticated as @${u?.xUsername || "unknown"} (${u?.xName})`);
-    log.info(acc.name, `  Balance: ${chalk.yellow(String(u?.bustsBalance ?? 0))} BUSTS`);
+    const u = me.user!;
+    log.success(acc.name, `Authenticated as @${u.xUsername} (${u.xName})`);
+    log.info(acc.name, `  Balance: ${chalk.yellow(String(u.bustsBalance))} BUSTS`);
     log.info(acc.name, `  Inventory: ${me.inventory?.length ?? 0} traits`);
-    log.info(acc.name, `  Whitelisted: ${u?.isWhitelisted ? chalk.green("YES") : chalk.red("NO")}`);
-    log.info(acc.name, `  Completed NFTs: ${me.completedNFTs?.length ?? 0}`);
-    log.info(acc.name, `  Referral Code: ${u?.referralCode || "none"}`);
+    log.info(acc.name, `  Whitelisted: ${u.isWhitelisted ? chalk.green("YES") : chalk.red("NO")}`);
+    log.info(acc.name, `  Drop Eligible: ${u.dropEligible ? chalk.green("YES") : chalk.red("NO")}`);
+    log.info(acc.name, `  Suspended: ${u.suspended ? chalk.red("YES") : chalk.green("NO")}`);
+    log.info(acc.name, `  Referral Code: ${u.referralCode || "none"}`);
 
-    // Also check drop status
+    // Pre-whitelist status
+    if (me.preWhitelist) {
+      const status = me.preWhitelist.status;
+      const color = status === "approved" ? chalk.green : status === "rejected" ? chalk.red : chalk.yellow;
+      log.info(acc.name, `  Pre-Whitelist: ${color(status.toUpperCase())}`);
+    } else {
+      log.info(acc.name, `  Pre-Whitelist: ${chalk.gray("not applied")}`);
+    }
+
+    // Drop status
     const drop = await api.getDropStatus(acc);
     if (drop.ok) {
-      const now = Date.now();
-      const elapsed = now - drop.sessId;
-      const msUntilNext = Math.max(0, 3600000 - elapsed);
-      const mins = Math.floor(msUntilNext / 60000);
-      const secs = Math.floor((msUntilNext % 60000) / 1000);
-
+      const mins = Math.floor(drop.msUntilNext / 60000);
+      const secs = Math.floor((drop.msUntilNext % 60000) / 1000);
       log.info(
         acc.name,
-        `  Drop: ${drop.isActive ? chalk.green("ACTIVE") : chalk.gray("waiting")} | Pool: ${drop.poolState} (${Math.round(drop.poolPct * 100)}%) | Next: ${mins}m${secs}s | Session claims: ${drop.mySessionClaims}/3`
+        `  Drop: ${drop.isActive ? chalk.green("ACTIVE") : chalk.gray("waiting")} | Pool: ${drop.poolState} (${Math.round(drop.poolPct * 100)}%) | Next: ${mins}m${secs}s | Claims: ${drop.mySessionClaims}/${drop.maxClaims}`
       );
     }
 

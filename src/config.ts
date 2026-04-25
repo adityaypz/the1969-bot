@@ -33,12 +33,8 @@ export function loadConfig(): BotConfig {
   return {
     accounts,
     pollInterval: int("POLL_INTERVAL", 15000),
-    claimDelayMin: int("CLAIM_DELAY_MIN", 2000),
-    claimDelayMax: int("CLAIM_DELAY_MAX", 8000),
-    armWaitBuffer: int("ARM_WAIT_BUFFER", 500),
-    maxClaimsPerSession: int("MAX_CLAIMS_PER_SESSION", 3),
     enableAutoClaim: bool("ENABLE_AUTO_CLAIM", true),
-    enableTaskClaim: bool("ENABLE_TASK_CLAIM", false),
+    enableTaskClaim: bool("ENABLE_TASK_CLAIM", true),
   };
 }
 

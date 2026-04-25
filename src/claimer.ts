@@ -1,20 +1,15 @@
 // ============================================
-// THE 1969 Bot - Drop Claimer Engine
+// THE 1969 Bot - Drop Claimer Engine (v2)
 // ============================================
-// Handles the full claim cycle per account:
-// 1. Poll /api/drop-status
-// 2. When drop is active + can claim -> arm
-// 3. Wait for notValidBeforeMs
-// 4. Submit claim with fake interaction proof
-// 5. Repeat up to maxClaims per session
+// New flow (post April 25 2026 update):
+// - No more arm/proof/mouse telemetry
+// - Admin pre-whitelist approval required
+// - Direct POST /api/drop-claim (no body)
+// - 2-hour cycle, 5-min window, 1 claim per session
 
-import type { AccountConfig, AccountState, BotConfig, DropStatus } from "./types.js";
+import type { AccountConfig, AccountState, BotConfig } from "./types.js";
 import * as api from "./api.js";
 import * as log from "./logger.js";
-import { buildInteractionProof } from "./interaction.js";
-
-const DROP_CYCLE_MS = 60 * 60 * 1000;
-const CLAIM_WINDOW_MS = 5 * 60 * 1000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -33,10 +28,9 @@ export class DropClaimer {
   private state: AccountState;
   private config: BotConfig;
   private running = false;
-  private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private lastHeartbeat = 0;
-  private claimCooldownUntil = 0; // backoff after errors
-  private claimInProgress = false; // lock to prevent concurrent claim flows
+  private cooldownUntil = 0;
+  private appliedPreWL = false;
 
   constructor(account: AccountConfig, config: BotConfig) {
     this.config = config;
@@ -49,9 +43,7 @@ export class DropClaimer {
       totalBusts: 0,
       lastClaimTime: 0,
       errors: 0,
-      isArming: false,
-      isClaiming: false,
-      windowOpenMs: Date.now() - Math.floor(Math.random() * 300000 + 30000),
+      claimInProgress: false,
     };
   }
 
@@ -72,6 +64,7 @@ export class DropClaimer {
     this.running = true;
     log.info(this.name, "Starting claimer...");
 
+    // Verify auth + check eligibility
     const me = await api.getMe(this.state.config);
     if (!me.ok) {
       log.error(this.name, `Auth failed: ${me.error || "invalid session"}. Check cookie.`);
@@ -80,21 +73,45 @@ export class DropClaimer {
     }
 
     this.state.profile = me;
-    const u = me.user;
+    const u = me.user!;
     log.success(
       this.name,
-      `Authenticated as @${u?.xUsername || "unknown"} | Balance: ${u?.bustsBalance ?? 0} BUSTS | Inventory: ${me.inventory?.length ?? 0} traits`
+      `Authenticated as @${u.xUsername} | Balance: ${u.bustsBalance} BUSTS | Inventory: ${me.inventory?.length ?? 0} traits`
     );
+
+    // Check pre-whitelist status
+    if (u.dropEligible) {
+      log.success(this.name, "Drop eligible: YES (approved)");
+    } else if (me.preWhitelist) {
+      log.info(this.name, `Pre-whitelist status: ${me.preWhitelist.status}`);
+      if (me.preWhitelist.status === "pending") {
+        log.warn(this.name, "Waiting for admin approval...");
+      } else if (me.preWhitelist.status === "rejected") {
+        log.error(this.name, "Pre-whitelist REJECTED. Can still earn BUSTS via tasks.");
+      }
+    } else {
+      // Auto-apply for pre-whitelist
+      log.info(this.name, "Not applied for pre-whitelist yet. Applying...");
+      const apply = await api.applyPreWhitelist(this.state.config);
+      if (apply.ok || apply.submitted) {
+        log.success(this.name, `Applied! Status: ${apply.status || "pending"}. Waiting for admin review.`);
+        this.appliedPreWL = true;
+      } else {
+        log.error(this.name, `Apply failed: ${apply.error}`);
+      }
+    }
+
+    if (u.suspended) {
+      log.error(this.name, "Account SUSPENDED. Cannot claim.");
+      this.running = false;
+      return;
+    }
 
     this.pollLoop();
   }
 
   stop() {
     this.running = false;
-    if (this.pollTimer) {
-      clearTimeout(this.pollTimer);
-      this.pollTimer = null;
-    }
     log.warn(this.name, "Claimer stopped.");
   }
 
@@ -109,19 +126,16 @@ export class DropClaimer {
 
       if (this.running) {
         const msUntil = this.state.lastDropStatus?.msUntilNext ?? Infinity;
-        let interval = this.config.pollInterval; // 15s default
+        let interval = this.config.pollInterval;
 
-        if (msUntil <= 10_000) {
-          interval = 1000;
-        } else if (msUntil <= 30_000) {
-          interval = 3000;
-        } else if (msUntil <= 60_000) {
-          interval = 5000;
-        }
+        // Adaptive polling near drop time
+        if (msUntil <= 10_000) interval = 2000;
+        else if (msUntil <= 30_000) interval = 3000;
+        else if (msUntil <= 60_000) interval = 5000;
 
-        // During active drop: poll every 5s (not 2s - avoid rate limit on status)
-        if (this.state.lastDropStatus?.isActive) {
-          interval = 5000;
+        // Slow poll during active (already claimed or waiting)
+        if (this.state.lastDropStatus?.isActive && this.state.claimInProgress) {
+          interval = 10000;
         }
 
         await sleep(interval);
@@ -130,208 +144,114 @@ export class DropClaimer {
   }
 
   private async tick() {
-    // Respect cooldown from rate limits
-    if (Date.now() < this.claimCooldownUntil) {
-      return;
-    }
+    if (Date.now() < this.cooldownUntil) return;
 
     const status = await api.getDropStatus(this.state.config);
-
     if (!status.ok) {
       log.error(this.name, `Drop status error: ${status.error}`);
       this.state.errors++;
       return;
     }
 
-    // Track session reset
-    if (
-      this.state.lastDropStatus &&
-      status.sessId !== this.state.lastDropStatus.sessId
-    ) {
+    // Session reset
+    if (this.state.lastDropStatus && status.sessId !== this.state.lastDropStatus.sessId) {
       log.info(this.name, `New session: ${status.sessId}`);
       this.state.sessionClaims = 0;
-      this.claimCooldownUntil = 0;
-      this.state.windowOpenMs =
-        Date.now() - Math.floor(Math.random() * 300000 + 30000);
+      this.cooldownUntil = 0;
     }
 
     this.state.lastDropStatus = status;
     this.state.sessionClaims = status.mySessionClaims || 0;
 
-    const msUntilNext = status.msUntilNext;
-    const msUntilClose = status.msUntilClose;
-    const isActive = status.isActive;
-    const isPoolEmpty =
-      status.poolState === "sealed" || status.poolPct <= 0;
-    const canClaim =
-      this.state.sessionClaims < this.config.maxClaimsPerSession;
+    const { isActive, msUntilNext, msUntilClose, poolState, poolPct, maxClaims } = status;
+    const isPoolEmpty = poolState === "sealed" || poolPct <= 0;
+    const canClaim = this.state.sessionClaims < maxClaims;
 
     if (!isActive) {
       const now = Date.now();
       if (msUntilNext <= 30_000 && msUntilNext > 0) {
         log.warn(this.name, `DROP IN ${formatMs(msUntilNext)}! Snipe mode active`);
       }
-
       if (now - this.lastHeartbeat >= 60_000) {
         this.lastHeartbeat = now;
-        log.info(
-          this.name,
-          `Waiting for next drop in ${formatMs(msUntilNext)} | Pool: ${status.poolState} (${Math.round(status.poolPct * 100)}%)`
-        );
+        log.info(this.name, `Waiting for next drop in ${formatMs(msUntilNext)} | Pool: ${poolState} (${Math.round(poolPct * 100)}%)`);
       }
       return;
     }
 
-    // Drop is active
-    if (isPoolEmpty) {
-      return; // silent - pool empty, nothing to do
-    }
+    // Drop active
+    if (isPoolEmpty) return;
+    if (!canClaim) return;
+    if (this.state.claimInProgress) return;
 
-    if (!canClaim) {
-      log.info(
-        this.name,
-        `Max claims reached (${this.state.sessionClaims}/${this.config.maxClaimsPerSession}).`
-      );
-      return;
-    }
-
-    // Prevent concurrent claim flows
-    if (this.claimInProgress) {
-      return;
+    // Check eligibility (refresh periodically)
+    if (!this.state.profile?.user?.dropEligible && !this.appliedPreWL) {
+      const me = await api.getMe(this.state.config);
+      if (me.ok) {
+        this.state.profile = me;
+        if (!me.user?.dropEligible) {
+          log.warn(this.name, "Not yet approved for drops. Waiting for admin review...");
+          this.cooldownUntil = Date.now() + 120_000; // check again in 2 min
+          return;
+        }
+        log.success(this.name, "Drop approval confirmed!");
+      }
     }
 
     log.info(
       this.name,
-      `Drop ACTIVE! Pool: ${status.poolState} (${Math.round(status.poolPct * 100)}%) | Claims: ${this.state.sessionClaims}/${this.config.maxClaimsPerSession} | Window closes in ${formatMs(msUntilClose)}`
+      `Drop ACTIVE! Pool: ${poolState} (${Math.round(poolPct * 100)}%) | Claims: ${this.state.sessionClaims}/${maxClaims} | Window closes in ${formatMs(msUntilClose)}`
     );
 
     await this.executeClaim();
   }
 
   private async executeClaim() {
-    this.claimInProgress = true;
+    this.state.claimInProgress = true;
 
     try {
-      // Step 1: ARM
-      log.info(this.name, "Arming drop...");
-      const arm = await api.armDrop(this.state.config);
+      // Small random delay (1-3s) to not be instant
+      const delay = 1000 + Math.random() * 2000;
+      log.info(this.name, `Claiming in ${formatMs(delay)}...`);
+      await sleep(delay);
 
-      if (!arm.ok) {
-        const err = (arm as any).error || "unknown";
-        log.error(this.name, `Arm failed: ${err}`);
-        this.state.errors++;
-
-        if (err === "rate_limited") {
-          // Back off 15-20s on rate limit
-          const backoff = 15000 + Math.random() * 5000;
-          log.warn(this.name, `Rate limited. Backing off ${formatMs(backoff)}...`);
-          this.claimCooldownUntil = Date.now() + backoff;
-        } else {
-          // Generic error: back off 5s
-          this.claimCooldownUntil = Date.now() + 5000;
-        }
-        return;
-      }
-
-      const armTime = Date.now();
-      const waitMs = arm.notValidBeforeMs - armTime;
-
-      log.info(
-        this.name,
-        `Armed! Wait until: ${new Date(arm.notValidBeforeMs).toLocaleTimeString()} (${formatMs(Math.max(0, waitMs))})`
-      );
-
-      // Step 2: Wait until notValidBeforeMs + generous buffer
-      // Server clock and client clock may drift 1-2s
-      if (waitMs > 0) {
-        const buffer = Math.floor(Math.random() * 1000 + 1500); // 1.5-2.5s buffer
-        await sleep(waitMs + buffer);
-      } else {
-        await sleep(1500); // safety margin even if already "past"
-      }
-
-      // Step 3: Build interaction proof
-      const armedMs = Date.now() - armTime;
-      const windowOpenMs = Date.now() - this.state.windowOpenMs;
-      const proof = buildInteractionProof(arm.nonce, windowOpenMs, armedMs);
-
-      // Step 4: CLAIM
       log.info(this.name, "Claiming...");
-      const claim = await api.claimDrop(
-        this.state.config,
-        arm.token,
-        proof
-      );
+      const claim = await api.claimDrop(this.state.config);
 
       if (!claim.ok) {
-        const err = (claim as any).error || "unknown";
-        log.error(this.name, `Claim failed: ${err}`);
+        const err = claim.error || "unknown";
+        log.error(this.name, `Claim failed: ${err}${claim.hint ? ` (${claim.hint})` : ""}`);
         this.state.errors++;
 
         if (err === "rate_limited") {
-          const backoff = 15000 + Math.random() * 5000;
-          log.warn(this.name, `Rate limited. Backing off ${formatMs(backoff)}...`);
-          this.claimCooldownUntil = Date.now() + backoff;
-        } else if (err === "slot_not_yet_revealed") {
-          // Tried too early - wait 4s and retry once
-          log.warn(this.name, "Too early! Retrying in 4s...");
-          await sleep(4000);
-          if (this.running) {
-            log.info(this.name, "Retrying claim...");
-            const retryProof = buildInteractionProof(arm.nonce, windowOpenMs + 4000, armedMs + 4000);
-            const retry = await api.claimDrop(this.state.config, arm.token, retryProof);
-            if (retry.ok) {
-              this.handleClaimSuccess(retry);
-            } else {
-              log.error(this.name, `Retry failed: ${(retry as any).error}`);
-              // Don't spam - back off 20s
-              this.claimCooldownUntil = Date.now() + 20000;
-            }
-          }
+          this.cooldownUntil = Date.now() + 20_000;
+          log.warn(this.name, "Rate limited. Backing off 20s...");
+        } else if (err === "not_pre_whitelisted") {
+          log.warn(this.name, "Not approved yet. Auto-applying...");
+          await api.applyPreWhitelist(this.state.config);
+          this.cooldownUntil = Date.now() + 120_000;
         } else if (err === "pool_exhausted") {
-          log.warn(this.name, "Pool exhausted. Waiting for next session.");
-          this.claimCooldownUntil = Date.now() + 60000; // don't retry this session
-        } else if (err === "proof_drag_too_short") {
-          log.warn(this.name, "Drag proof rejected. Retrying with new proof in 5s...");
-          await sleep(5000);
-          // Will retry on next tick with fresh proof
+          log.warn(this.name, "Pool exhausted.");
+          this.cooldownUntil = Date.now() + 300_000;
         } else {
-          this.claimCooldownUntil = Date.now() + 10000;
+          this.cooldownUntil = Date.now() + 15_000;
         }
         return;
       }
 
       // Success!
-      this.handleClaimSuccess(claim);
+      this.state.sessionClaims++;
+      this.state.totalClaims++;
+      this.state.totalBusts += (claim.bustsReward || 0) + (claim.dailyBonus || 0);
+      this.state.lastClaimTime = Date.now();
 
-      // If we can still claim, wait then try again
-      if (this.state.sessionClaims < this.config.maxClaimsPerSession) {
-        const nextDelay = 3000 + Math.random() * 5000;
-        log.info(
-          this.name,
-          `${this.config.maxClaimsPerSession - this.state.sessionClaims} claims remaining. Next in ${formatMs(nextDelay)}...`
-        );
-        await sleep(nextDelay);
-
-        if (this.running) {
-          await this.executeClaim();
-        }
-      }
+      const elem = claim.element;
+      log.success(
+        this.name,
+        `CLAIMED: ${elem?.name || "unknown"} (${elem?.rarity || "?"}) [${elem?.type}/${elem?.variant}] | +${claim.bustsReward} BUSTS${claim.dailyBonus ? ` +${claim.dailyBonus} daily bonus` : ""} | Position: #${claim.position}`
+      );
     } finally {
-      this.claimInProgress = false;
+      this.state.claimInProgress = false;
     }
-  }
-
-  private handleClaimSuccess(claim: any) {
-    this.state.sessionClaims++;
-    this.state.totalClaims++;
-    this.state.totalBusts += (claim.bustsReward || 0) + (claim.dailyBonus || 0);
-    this.state.lastClaimTime = Date.now();
-
-    const elem = claim.element;
-    log.success(
-      this.name,
-      `CLAIMED: ${elem?.name || "unknown"} (${elem?.rarity || "?"}) [${elem?.type}/${elem?.variant}] | +${claim.bustsReward} BUSTS${claim.dailyBonus ? ` +${claim.dailyBonus} daily bonus` : ""} | Position: #${claim.position}`
-    );
   }
 }

@@ -11,53 +11,24 @@ export interface AccountConfig {
 export interface BotConfig {
   accounts: AccountConfig[];
   pollInterval: number;
-  claimDelayMin: number;
-  claimDelayMax: number;
-  armWaitBuffer: number;
-  maxClaimsPerSession: number;
   enableAutoClaim: boolean;
   enableTaskClaim: boolean;
 }
 
 // API Response types
-export interface ApiResponse<T = any> {
-  ok: boolean;
-  error?: string;
-  status?: number;
-  data?: T;
-}
-
 export interface DropStatus {
   ok: boolean;
   error?: string;
   sessId: number;
-  poolState: "stocked" | "thinning" | "low" | "sealed";
+  poolState: "stocked" | "flowing" | "thinning" | "low" | "sealed";
   poolPct: number;
   isActive: boolean;
   mySessionClaims: number;
   msUntilNext: number;
   msUntilClose: number;
   maxClaims: number;
-  admin?: any;
-}
-
-export interface ArmResponse {
-  ok: boolean;
-  token: string;
-  nonce: string;
-  notValidBeforeMs: number;
-  expiresAtMs: number;
-  error?: string;
-}
-
-export interface InteractionProof {
-  nonce: string;
-  windowOpenMs: number;
-  moveCount: number;
-  pathEntropy: number;
-  dragVarX: number;
-  dragVarY: number;
-  armedMs: number;
+  portraitsBuilt?: number;
+  supplyCap?: number;
 }
 
 export interface ClaimResponse {
@@ -72,10 +43,20 @@ export interface ClaimResponse {
   position?: number;
   dailyBonus?: number;
   error?: string;
+  hint?: string;
+}
+
+export interface PreWhitelistApplyResponse {
+  ok: boolean;
+  id?: string;
+  status?: string; // "pending" | "approved" | "rejected"
+  submitted?: boolean;
+  alreadyApproved?: boolean;
+  error?: string;
 }
 
 export interface UserProfile {
-  ok: boolean; // normalized by api.ts
+  ok: boolean;
   error?: string;
   authenticated?: boolean;
   user?: {
@@ -90,13 +71,33 @@ export interface UserProfile {
     walletAddress: string | null;
     dailyClaimedOn: string | null;
     followClaimedAt: string | null;
+    suspended: boolean;
+    dropEligible: boolean;
   };
+  preWhitelist: {
+    id: string;
+    status: string; // "pending" | "approved" | "rejected"
+    message?: string;
+    decidedAt?: string;
+  } | null;
   inventory?: any[];
   completedNFTs?: any[];
   pendingGifts?: any[];
   pendingBustsTransfers?: any[];
   bustsHistory?: any[];
   whitelistWallet?: string | null;
+}
+
+export interface BoxOpenResponse {
+  ok: boolean;
+  element?: {
+    type: string;
+    variant: string;
+    name: string;
+    rarity: string;
+  };
+  cost?: number;
+  error?: string;
 }
 
 export type TaskAction = "like" | "rt" | "reply";
@@ -139,20 +140,6 @@ export interface FollowClaimResponse {
   error?: string;
 }
 
-// Session state tracking
-export interface SessionState {
-  sessId: number;
-  isActive: boolean;
-  isPoolEmpty: boolean;
-  msUntilNext: number;
-  msUntilClose: number;
-  poolState: string;
-  poolPct: number;
-  claimsThisSession: number;
-  canClaim: boolean;
-  maxClaims: number;
-}
-
 // Account runtime state
 export interface AccountState {
   config: AccountConfig;
@@ -163,9 +150,7 @@ export interface AccountState {
   totalBusts: number;
   lastClaimTime: number;
   errors: number;
-  isArming: boolean;
-  isClaiming: boolean;
-  windowOpenMs: number; // simulated page open time
+  claimInProgress: boolean;
 }
 
 export type LogLevel = "info" | "warn" | "error" | "success" | "debug";

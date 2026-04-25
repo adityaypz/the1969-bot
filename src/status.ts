@@ -1,9 +1,6 @@
 // ============================================
 // THE 1969 Bot - Status Checker
 // ============================================
-// Quick check of current drop status without running the bot
-//
-// Usage: npm run status
 
 import { loadConfig } from "./config.js";
 import * as api from "./api.js";
@@ -21,47 +18,41 @@ async function main() {
     process.exit(1);
   }
 
-  log.info(acc.name, "Fetching drop status...\n");
+  log.info(acc.name, "Fetching status...\n");
 
-  const status = await api.getDropStatus(acc);
+  const [me, status] = await Promise.all([
+    api.getMe(acc),
+    api.getDropStatus(acc),
+  ]);
 
-  if (!status.ok) {
-    log.error(acc.name, `Failed: ${status.error}`);
-    process.exit(1);
+  if (me.ok && me.user) {
+    const u = me.user;
+    console.log(chalk.bold("  Account"));
+    console.log(chalk.gray("  ─────────────────────────"));
+    console.log(`  User:          @${u.xUsername} (${u.xName})`);
+    console.log(`  Balance:       ${chalk.yellow(String(u.bustsBalance))} BUSTS`);
+    console.log(`  Drop Eligible: ${u.dropEligible ? chalk.green("YES") : chalk.red("NO")}`);
+    console.log(`  Pre-WL:        ${me.preWhitelist ? me.preWhitelist.status : "not applied"}`);
+    console.log(`  Inventory:     ${me.inventory?.length ?? 0} traits`);
+    console.log();
   }
 
-  const now = Date.now();
-  const elapsed = now - status.sessId;
-  const msUntilNext = Math.max(0, 3600000 - elapsed);
-  const msUntilClose = Math.max(0, 300000 - elapsed);
+  if (status.ok) {
+    const nextMins = Math.floor(status.msUntilNext / 60000);
+    const nextSecs = Math.floor((status.msUntilNext % 60000) / 1000);
 
-  console.log(chalk.bold("  Drop Status"));
-  console.log(chalk.gray("  ─────────────────────────"));
-  console.log(`  Session ID:    ${status.sessId}`);
-  console.log(
-    `  Active:        ${status.isActive ? chalk.green.bold("YES - CLAIM NOW!") : chalk.gray("No")}`
-  );
-  console.log(`  Pool State:    ${status.poolState}`);
-  console.log(
-    `  Pool Remaining:${chalk.yellow(` ${Math.round(status.poolPct * 100)}%`)}`
-  );
-  console.log(`  Your Claims:   ${status.mySessionClaims}/3`);
-
-  if (status.isActive) {
-    const closeMins = Math.floor(msUntilClose / 60000);
-    const closeSecs = Math.floor((msUntilClose % 60000) / 1000);
-    console.log(
-      `  Window Closes: ${chalk.red(`${closeMins}m${closeSecs}s`)}`
-    );
-  } else {
-    const nextMins = Math.floor(msUntilNext / 60000);
-    const nextSecs = Math.floor((msUntilNext % 60000) / 1000);
-    console.log(
-      `  Next Drop:     ${chalk.cyan(`${nextMins}m${nextSecs}s`)}`
-    );
+    console.log(chalk.bold("  Drop Status"));
+    console.log(chalk.gray("  ─────────────────────────"));
+    console.log(`  Active:        ${status.isActive ? chalk.green.bold("YES - CLAIM NOW!") : chalk.gray("No")}`);
+    console.log(`  Pool:          ${status.poolState} (${chalk.yellow(Math.round(status.poolPct * 100) + "%")})`);
+    console.log(`  Your Claims:   ${status.mySessionClaims}/${status.maxClaims}`);
+    console.log(`  Cycle:         2 hours, 5-min window, ${status.maxClaims} claim/session`);
+    console.log(`  Next Drop:     ${chalk.cyan(`${nextMins}m${nextSecs}s`)}`);
+    if (status.portraitsBuilt != null) {
+      console.log(`  Portraits:     ${status.portraitsBuilt}/${status.supplyCap}`);
+    }
+    console.log();
   }
-
-  console.log();
 }
 
 main().catch((e) => {

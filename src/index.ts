@@ -1,18 +1,15 @@
 // ============================================
-// THE 1969 Bot - Main Entry Point
+// THE 1969 Bot - Main Entry Point (v2)
 // ============================================
-// Multi-account auto-claim bot for the1969.io
+// Updated for new drop system (April 25 2026):
+// - Admin pre-whitelist approval
+// - Direct claim (no arm/proof)
+// - 2-hour cycle, 1 claim per session
 //
 // Usage:
 //   npm start        - Run the bot
-//   npm run dev      - Run with auto-reload
 //   npm run auth     - Test auth for all accounts
 //   npm run status   - Check drop status
-//
-// Setup:
-//   1. Copy .env.example to .env
-//   2. Add your account cookies (see .env.example)
-//   3. npm start
 
 import { loadConfig } from "./config.js";
 import { DropClaimer } from "./claimer.js";
@@ -27,10 +24,9 @@ async function main() {
 
   log.info("", `Loaded ${config.accounts.length} account(s)`);
   log.info("", `Poll interval: ${config.pollInterval / 1000}s`);
-  log.info("", `Claim delay: ${config.claimDelayMin}-${config.claimDelayMax}ms`);
-  log.info("", `Max claims/session: ${config.maxClaimsPerSession}`);
   log.info("", `Auto-claim: ${config.enableAutoClaim ? "ON" : "OFF"}`);
   log.info("", `Social tasks: ${config.enableTaskClaim ? "ON" : "OFF"}`);
+  log.info("", `Drop cycle: 2 hours | 1 claim/session | Admin approval required`);
   console.log();
 
   const claimers: DropClaimer[] = [];
@@ -40,21 +36,18 @@ async function main() {
     const acc = config.accounts[i];
     log.info("", `Initializing [${acc.name}]${acc.proxy ? ` via proxy` : ""}...`);
 
-    // Stagger start by 2-5s per account
+    // Stagger start
     if (i > 0) {
       const stagger = Math.floor(Math.random() * 3000 + 2000);
-      log.debug("", `Staggering ${acc.name} by ${stagger}ms`);
       await new Promise((r) => setTimeout(r, stagger));
     }
 
-    // Drop claimer
     if (config.enableAutoClaim) {
       const claimer = new DropClaimer(acc, config);
       claimers.push(claimer);
       claimer.start();
     }
 
-    // Social task runner
     if (config.enableTaskClaim) {
       const social = new SocialTaskRunner(acc, config);
       socialRunners.push(social);
@@ -62,28 +55,21 @@ async function main() {
     }
   }
 
-  // Stats printer every 5 minutes
+  // Stats every 5 min
   setInterval(() => {
     console.log();
     log.info("", chalk.bold("=== Session Stats ==="));
     for (const c of claimers) {
       const s = c.stats;
-      log.info(
-        c.name,
-        `Drops: ${s.totalClaims} (session: ${s.sessionClaims}) | BUSTS: ${s.totalBusts} | Errors: ${s.errors}`
-      );
+      log.info(c.name, `Drops: ${s.totalClaims} (session: ${s.sessionClaims}) | BUSTS: ${s.totalBusts} | Errors: ${s.errors}`);
     }
     for (const s of socialRunners) {
       const st = s.stats;
-      log.info(
-        s.name,
-        `Tasks: ${st.completedTasks} done, ${st.totalActions} actions | BUSTS: ${st.totalBusts}`
-      );
+      log.info(s.name, `Tasks: ${st.completedTasks} done, ${st.totalActions} actions | BUSTS: ${st.totalBusts}`);
     }
     console.log();
   }, 5 * 60 * 1000);
 
-  // Graceful shutdown
   const shutdown = () => {
     log.warn("", "Shutting down...");
     for (const c of claimers) c.stop();
