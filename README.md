@@ -4,50 +4,67 @@ Auto-claim bot for [THE 1969](https://the1969.io?ref=vncturn) hourly trait drops
 
 ## Features
 
-- Auto-claim traits every hourly drop (max 3/session)
+- Auto-apply for pre-whitelist (admin approval)
+- Auto-claim traits every 2-hour drop (1/session)
+- Auto-complete social tasks (like/rt/reply for BUSTS)
 - Multi-account farming with staggered timing
-- Human-like interaction proof (mouse telemetry, drag variance)
-- Anti-bot score evasion (targets <30/100)
 - Proxy support per account
-- Periodic heartbeat logs
 
 ## Quick Start
 
-1. **Register** on [THE 1969](https://the1969.io?ref=vncturn) (connect your X account)
+### 1. Install
 
-2. **Install**
 ```bash
 git clone https://github.com/adityaypz/the1969-bot.git
 cd the1969-bot
 npm install
 ```
 
-3. **Get your session cookie**
-   - Login at [the1969.io](https://the1969.io?ref=vncturn)
-   - Open DevTools (`F12`) > Application > Cookies
-   - Copy the `the1969_session` value
+### 2. Easy Setup (Recommended)
 
-4. **Configure**
 ```bash
-cp .env.example .env
-```
-Edit `.env` and add your cookie:
-```
-ACCOUNTS=[{"name":"myaccount","cookie":"the1969_session=YOUR_COOKIE_HERE"}]
+npm run setup
 ```
 
-5. **Run**
+Just paste your cookie(s) when prompted. The script will create `.env` for you.
+
+**How to get your cookie:**
+1. Go to [the1969.io](https://the1969.io?ref=vncturn) and login
+2. Press `F12` (DevTools)
+3. Go to **Application** > **Cookies**
+4. Copy the value of `the1969_session`
+5. Paste it in the setup script
+
+### 3. Run
+
 ```bash
 npm start          # Run bot
 npm run auth       # Test authentication
 npm run status     # Check drop status
-npm run dev        # Run with auto-reload
+```
+
+## Manual Setup (Advanced)
+
+If you prefer manual config:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+```env
+ACCOUNTS=[{"name":"myaccount","cookie":"the1969_session=YOUR_COOKIE_HERE"}]
 ```
 
 ## Multi-Account Setup
 
+During `npm run setup`, just say "yes" when asked to add another account. Or manually:
+
 ```env
-ACCOUNTS=[{"name":"acc1","cookie":"the1969_session=..."},{"name":"acc2","cookie":"the1969_session=..."}]
+ACCOUNTS=[
+  {"name":"main","cookie":"the1969_session=..."},
+  {"name":"alt1","cookie":"the1969_session=..."}
+]
 PROXIES=["http://user:pass@proxy1:8080","http://user:pass@proxy2:8080"]
 ```
 
@@ -56,20 +73,24 @@ PROXIES=["http://user:pass@proxy1:8080","http://user:pass@proxy2:8080"]
 | Variable | Default | Description |
 |---|---|---|
 | `POLL_INTERVAL` | 15000 | Status poll interval (ms) |
-| `CLAIM_DELAY_MIN` | 2000 | Min delay before claim (ms) |
-| `CLAIM_DELAY_MAX` | 8000 | Max delay before claim (ms) |
-| `MAX_CLAIMS_PER_SESSION` | 3 | Claims per hourly session |
+| `ENABLE_AUTO_CLAIM` | true | Auto-claim drops |
+| `ENABLE_TASK_CLAIM` | true | Auto-complete social tasks |
 
 ## How It Works
 
-1. Polls `/api/drop-status` every 15s
-2. When drop is **ACTIVE** (hourly, 5-min window):
-   - Arms the drop (`/api/drop-arm`)
-   - Waits server-enforced delay + random human delay
-   - Generates fake mouse/drag telemetry
-   - Claims trait (`/api/drop-claim`)
-   - Repeats up to 3x per session
-3. Waits for next hourly drop
+### Drop System (v2 - April 25 2026)
+
+1. **Pre-whitelist:** Bot auto-applies on startup. Admin reviews your X profile manually.
+2. **Approval:** Once approved (`dropEligible: true`), bot can claim.
+3. **Claim:** Every 2 hours, 5-min window, 1 trait per session.
+4. **No mouse proof:** Direct `POST /api/drop-claim` (no arm/telemetry needed).
+
+### Social Tasks
+
+- Auto-submit like, rt, reply for all active tweet tasks
+- Trifecta bonus: 100 BUSTS when all 3 actions completed
+- Auto-claim follow reward on startup
+- Checks for new tasks every 10 minutes
 
 ## Disclaimer
 
