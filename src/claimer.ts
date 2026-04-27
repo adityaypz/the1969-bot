@@ -85,9 +85,11 @@ export class DropClaimer {
     } else if (me.preWhitelist) {
       log.info(this.name, `Pre-whitelist status: ${me.preWhitelist.status}`);
       if (me.preWhitelist.status === "pending") {
-        log.warn(this.name, "Waiting for admin approval...");
+        log.warn(this.name, "Waiting for admin approval. Will check periodically.");
       } else if (me.preWhitelist.status === "rejected") {
-        log.error(this.name, "Pre-whitelist REJECTED. Can still earn BUSTS via tasks.");
+        log.error(this.name, "Pre-whitelist REJECTED. Drop claimer disabled. Social tasks still active.");
+        this.running = false;
+        return;
       }
     } else {
       // Auto-apply for pre-whitelist
@@ -227,9 +229,8 @@ export class DropClaimer {
           this.cooldownUntil = Date.now() + 20_000;
           log.warn(this.name, "Rate limited. Backing off 20s...");
         } else if (err === "not_pre_whitelisted") {
-          log.warn(this.name, "Not approved yet. Auto-applying...");
-          await api.applyPreWhitelist(this.state.config);
-          this.cooldownUntil = Date.now() + 120_000;
+          log.error(this.name, "Not approved for drops. Stopping claimer for this account.");
+          this.running = false;
         } else if (err === "pool_exhausted") {
           log.warn(this.name, "Pool exhausted.");
           this.cooldownUntil = Date.now() + 300_000;
