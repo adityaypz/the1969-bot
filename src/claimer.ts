@@ -1,13 +1,17 @@
 // ============================================
 // THE 1969 Bot - Drop Claimer Engine (v2)
 // ============================================
-// Strategy: predict drop time, fire claim at exact moment
-// Drop cycle = 2 hours. We know sessId = epoch of cycle start.
-// Claim fires INSTANTLY when isActive detected - zero delay.
+// Strategy: PRE-FIRE claim at exact drop timestamp
+// We know next drop = sessId + 2hrs (7200000ms)
+// Instead of polling for isActive, we sleep until
+// exact drop time and fire claim at T+0ms.
+// Pool has 200 slots, 1000+ people online, gone in 3s.
 
 import type { AccountConfig, AccountState, BotConfig } from "./types.js";
 import * as api from "./api.js";
 import * as log from "./logger.js";
+
+const DROP_CYCLE_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -27,8 +31,6 @@ export class DropClaimer {
   private config: BotConfig;
   private running = false;
   private lastHeartbeat = 0;
-  private cooldownUntil = 0;
-  private appliedPreWL = false;
   private eligible = false;
 
   constructor(account: AccountConfig, config: BotConfig) {
@@ -77,37 +79,31 @@ export class DropClaimer {
       `Authenticated as @${u.xUsername} | Balance: ${u.bustsBalance} BUSTS | Inventory: ${me.inventory?.length ?? 0} traits`
     );
 
-    // Check pre-whitelist status
     if (u.dropEligible) {
-      log.success(this.name, "Drop eligible: YES (approved)");
+      log.success(this.name, "Drop eligible: YES");
       this.eligible = true;
     } else if (me.preWhitelist) {
-      log.info(this.name, `Pre-whitelist status: ${me.preWhitelist.status}`);
-      if (me.preWhitelist.status === "pending") {
-        log.warn(this.name, "Waiting for admin approval. Will check periodically.");
-      } else if (me.preWhitelist.status === "rejected") {
-        log.error(this.name, "Pre-whitelist REJECTED. Drop claimer disabled. Social tasks still active.");
+      if (me.preWhitelist.status === "rejected") {
+        log.error(this.name, "Pre-whitelist REJECTED. Claimer disabled.");
         this.running = false;
         return;
       }
+      log.warn(this.name, `Pre-whitelist: ${me.preWhitelist.status}. Waiting...`);
     } else {
-      log.info(this.name, "Not applied for pre-whitelist yet. Applying...");
+      log.info(this.name, "Applying for pre-whitelist...");
       const apply = await api.applyPreWhitelist(this.state.config);
       if (apply.ok || apply.submitted) {
-        log.success(this.name, `Applied! Status: ${apply.status || "pending"}. Waiting for admin review.`);
-        this.appliedPreWL = true;
-      } else {
-        log.error(this.name, `Apply failed: ${apply.error}`);
+        log.success(this.name, `Applied! Waiting for admin review.`);
       }
     }
 
     if (u.suspended) {
-      log.error(this.name, "Account SUSPENDED. Cannot claim.");
+      log.error(this.name, "Account SUSPENDED.");
       this.running = false;
       return;
     }
 
-    this.pollLoop();
+    this.mainLoop();
   }
 
   stop() {
@@ -115,97 +111,99 @@ export class DropClaimer {
     log.warn(this.name, "Claimer stopped.");
   }
 
-  private async pollLoop() {
+  private async mainLoop() {
     while (this.running) {
       try {
-        await this.tick();
-      } catch (e: any) {
-        log.error(this.name, `Poll error: ${e.message}`);
-        this.state.errors++;
-      }
-
-      if (this.running) {
-        const msUntil = this.state.lastDropStatus?.msUntilNext ?? Infinity;
-        let interval = this.config.pollInterval;
-
-        // AGGRESSIVE polling near drop time
-        if (msUntil <= 5_000) interval = 500;       // <5s: every 500ms
-        else if (msUntil <= 15_000) interval = 1000; // <15s: every 1s
-        else if (msUntil <= 30_000) interval = 2000; // <30s: every 2s
-        else if (msUntil <= 60_000) interval = 5000; // <1min: every 5s
-
-        // Already claimed this session? slow down
-        if (this.state.lastDropStatus?.isActive && this.state.sessionClaims > 0) {
-          interval = 30000;
+        // Step 1: Get drop status to know next drop time
+        const status = await api.getDropStatus(this.state.config);
+        if (!status.ok) {
+          this.state.errors++;
+          await sleep(15000);
+          continue;
         }
 
-        await sleep(interval);
+        this.state.lastDropStatus = status;
+        this.state.sessionClaims = status.mySessionClaims || 0;
+
+        // Already claimed this session?
+        if (this.state.sessionClaims >= status.maxClaims) {
+          log.info(this.name, `Already claimed this session. Next drop in ${formatMs(status.msUntilNext)}`);
+          // Sleep until next session + small buffer
+          await this.sleepWithHeartbeat(status.msUntilNext);
+          continue;
+        }
+
+        // Check eligibility
+        if (!this.eligible) {
+          const me = await api.getMe(this.state.config);
+          if (me.ok && me.user?.dropEligible) {
+            this.eligible = true;
+            log.success(this.name, "Drop approval confirmed!");
+          } else {
+            log.info(this.name, `Not eligible yet. Checking again in 5min. Next drop in ${formatMs(status.msUntilNext)}`);
+            await sleep(300_000);
+            continue;
+          }
+        }
+
+        // Drop is currently active?
+        if (status.isActive && status.poolPct > 0 && status.poolState !== "sealed") {
+          log.info(this.name, `Drop ACTIVE NOW! Pool: ${status.poolState} (${Math.round(status.poolPct * 100)}%) - FIRING!`);
+          await this.fireClaim();
+          continue;
+        }
+
+        // Pool already empty for this session
+        if (status.isActive && (status.poolState === "sealed" || status.poolPct <= 0)) {
+          log.info(this.name, `Pool already empty. Next drop in ${formatMs(status.msUntilNext)}`);
+          await this.sleepWithHeartbeat(status.msUntilNext);
+          continue;
+        }
+
+        // Not active yet - sleep until exact drop time, then pre-fire
+        const msUntil = status.msUntilNext;
+
+        if (msUntil > 60_000) {
+          // Far away - sleep with heartbeat
+          log.info(this.name, `Next drop in ${formatMs(msUntil)}. Sleeping...`);
+          await this.sleepWithHeartbeat(msUntil - 30_000); // wake up 30s before
+          continue;
+        }
+
+        if (msUntil > 5_000) {
+          // Close - countdown
+          log.warn(this.name, `Drop in ${formatMs(msUntil)}! Preparing to snipe...`);
+          await sleep(msUntil - 3000); // sleep until 3s before
+        }
+
+        if (msUntil > 0) {
+          // Final countdown - precision sleep
+          const remaining = status.msUntilNext - (Date.now() - (Date.now())); // recalc
+          const finalStatus = await api.getDropStatus(this.state.config);
+          if (finalStatus.ok && finalStatus.msUntilNext > 0) {
+            const preciseWait = Math.max(0, finalStatus.msUntilNext - 100); // fire 100ms early
+            log.warn(this.name, `SNIPING in ${preciseWait}ms...`);
+            if (preciseWait > 0) await sleep(preciseWait);
+          }
+        }
+
+        // FIRE!
+        await this.fireClaim();
+
+      } catch (e: any) {
+        log.error(this.name, `Loop error: ${e.message}`);
+        this.state.errors++;
+        await sleep(10000);
       }
     }
   }
 
-  private async tick() {
-    if (Date.now() < this.cooldownUntil) return;
-
-    // Check eligibility periodically if not yet approved
-    if (!this.eligible) {
-      const me = await api.getMe(this.state.config);
-      if (me.ok && me.user?.dropEligible) {
-        this.eligible = true;
-        this.state.profile = me;
-        log.success(this.name, "Drop approval confirmed!");
-      } else {
-        // Only check every 5 min
-        this.cooldownUntil = Date.now() + 300_000;
-        return;
-      }
-    }
-
-    const status = await api.getDropStatus(this.state.config);
-    if (!status.ok) {
-      this.state.errors++;
-      return;
-    }
-
-    // Session reset
-    if (this.state.lastDropStatus && status.sessId !== this.state.lastDropStatus.sessId) {
-      log.info(this.name, `New session: ${status.sessId}`);
-      this.state.sessionClaims = 0;
-      this.cooldownUntil = 0;
-    }
-
-    this.state.lastDropStatus = status;
-    this.state.sessionClaims = status.mySessionClaims || 0;
-
-    const { isActive, msUntilNext, poolState, poolPct, maxClaims } = status;
-    const isPoolEmpty = poolState === "sealed" || poolPct <= 0;
-    const canClaim = this.state.sessionClaims < maxClaims;
-
-    if (!isActive) {
-      const now = Date.now();
-      if (msUntilNext <= 15_000 && msUntilNext > 0) {
-        log.warn(this.name, `DROP IN ${formatMs(msUntilNext)}! Snipe mode - polling every 500ms`);
-      }
-      if (now - this.lastHeartbeat >= 60_000) {
-        this.lastHeartbeat = now;
-        log.info(this.name, `Waiting for next drop in ${formatMs(msUntilNext)} | Pool: ${poolState} (${Math.round(poolPct * 100)}%)`);
-      }
-      return;
-    }
-
-    // Drop active - CLAIM IMMEDIATELY
-    if (isPoolEmpty || !canClaim || this.state.claimInProgress) return;
-
-    log.info(this.name, `Drop ACTIVE! Pool: ${poolState} (${Math.round(poolPct * 100)}%) - CLAIMING NOW!`);
-    await this.executeClaim();
-  }
-
-  private async executeClaim() {
+  private async fireClaim() {
     this.state.claimInProgress = true;
+    const t0 = Date.now();
 
     try {
-      // NO DELAY - fire immediately
-      const t0 = Date.now();
+      log.info(this.name, "FIRING CLAIM!");
       const claim = await api.claimDrop(this.state.config);
       const elapsed = Date.now() - t0;
 
@@ -214,37 +212,54 @@ export class DropClaimer {
         log.error(this.name, `Claim failed (${elapsed}ms): ${err}`);
         this.state.errors++;
 
-        if (err === "rate_limited") {
-          this.cooldownUntil = Date.now() + 20_000;
+        if (err === "pool_exhausted") {
+          log.warn(this.name, `Pool gone in ${elapsed}ms. Will try next session.`);
         } else if (err === "not_pre_whitelisted") {
-          log.error(this.name, "Not approved. Stopping claimer.");
+          log.error(this.name, "Not approved. Stopping.");
           this.running = false;
-        } else if (err === "pool_exhausted") {
-          log.warn(this.name, `Pool exhausted after ${elapsed}ms. Too slow.`);
-          this.cooldownUntil = Date.now() + 300_000;
-        } else if (err === "already_claimed_session") {
-          log.info(this.name, "Already claimed this session.");
-          this.state.sessionClaims = 1;
-        } else {
-          this.cooldownUntil = Date.now() + 15_000;
+        } else if (err === "session_not_active") {
+          // Fired too early - wait 500ms and retry once
+          log.warn(this.name, "Too early! Retrying in 500ms...");
+          await sleep(500);
+          const retry = await api.claimDrop(this.state.config);
+          if (retry.ok) {
+            this.handleSuccess(retry, Date.now() - t0);
+          } else {
+            log.error(this.name, `Retry failed: ${(retry as any).error}`);
+          }
         }
         return;
       }
 
-      // Success!
-      const elapsed2 = Date.now() - t0;
-      this.state.sessionClaims++;
-      this.state.totalClaims++;
-      this.state.totalBusts += (claim.bustsReward || 0) + (claim.dailyBonus || 0);
-      this.state.lastClaimTime = Date.now();
-
-      const elem = claim.element;
-      log.success(
-        this.name,
-        `CLAIMED in ${elapsed2}ms: ${elem?.name || "unknown"} (${elem?.rarity || "?"}) [${elem?.type}/${elem?.variant}] | +${claim.bustsReward} BUSTS${claim.dailyBonus ? ` +${claim.dailyBonus} daily` : ""} | #${claim.position}`
-      );
+      this.handleSuccess(claim, elapsed);
     } finally {
       this.state.claimInProgress = false;
+    }
+  }
+
+  private handleSuccess(claim: any, elapsed: number) {
+    this.state.sessionClaims++;
+    this.state.totalClaims++;
+    this.state.totalBusts += (claim.bustsReward || 0) + (claim.dailyBonus || 0);
+    this.state.lastClaimTime = Date.now();
+
+    const elem = claim.element;
+    log.success(
+      this.name,
+      `CLAIMED in ${elapsed}ms! ${elem?.name || "?"} (${elem?.rarity || "?"}) [${elem?.type}/${elem?.variant}] | +${claim.bustsReward} BUSTS${claim.dailyBonus ? ` +${claim.dailyBonus} daily` : ""} | #${claim.position}`
+    );
+  }
+
+  private async sleepWithHeartbeat(totalMs: number) {
+    const start = Date.now();
+    while (this.running && Date.now() - start < totalMs) {
+      const remaining = totalMs - (Date.now() - start);
+      const now = Date.now();
+      if (now - this.lastHeartbeat >= 60_000) {
+        this.lastHeartbeat = now;
+        log.info(this.name, `Sleeping... next drop in ${formatMs(remaining)}`);
+      }
+      await sleep(Math.min(15000, remaining));
     }
   }
 }
